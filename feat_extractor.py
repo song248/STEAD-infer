@@ -88,10 +88,10 @@ del model.blocks[-1]
 
 summary(model, (1, 3, 16, 320, 320))
 
-test_list = list(open("Anomaly_Detection_splits/Anomaly_Test.txt"))
-
-test_list = [path for path in test_list if "Shooting047" in path]
-
+# Inference Video List
+# test_list = list(open("Anomaly_Test.txt"))
+test_list = list(open("violence_Test.txt"))
+# test_list = [path for path in test_list if "Shooting047" in path]
 
 test_list = [('Videos/' + path.strip('\n'), {'label': 0 if 'Normal' in path else 1, 'video_label': 'X3D_Videos/' + path.strip('\n')}) for path in test_list if not os.path.isfile('X3D_Videos/' + path.strip('\n')[:-3] + 'npy')]
 print(len(test_list))

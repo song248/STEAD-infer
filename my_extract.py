@@ -13,10 +13,10 @@ from torch import nn
 import av
 
 # ====== Config ======
-VIDEO_DIR = 'violence_data'
+VIDEO_DIR = 'violence'
 OUTPUT_DIR = 'my_video_npy'
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model_name = 'x3d_l'
+AVAILABLE_GPUS = [0, 1]  # 사용할 GPU 인덱스
+MODEL_NAME = 'x3d_l'
 
 # ====== Load pretrained model and remove classification head ======
 model = torch.hub.load('facebookresearch/pytorchvideo', model_name, pretrained=True)
