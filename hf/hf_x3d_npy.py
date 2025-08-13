@@ -1,22 +1,25 @@
-import torch
+import os
 import math
-from torch import nn
+import torch
 import numpy as np
-from model import Model
+from tqdm import tqdm
+from torch import nn
 from pytorchvideo.data.encoded_video import EncodedVideo
-from torchvision.transforms import Compose, Lambda
 
 # ===== CONFIG =====
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model_path = "saved_models/888tiny.pkl"
-video_file = "test01.mp4"
-threshold = 0.5
+
+video_root_folder = "hf-violence/video"
+feature_save_folder = "hf_npy"  # 특징 저장 폴더
+os.makedirs(feature_save_folder, exist_ok=True)
+
+valid_exts = [".mp4", ".avi"]
 
 # ===== X3D 설정 =====
 model_name = 'x3d_l'
 transform_params = {
-    "num_frames": 15,           # 15프레임
-    "sampling_rate": 4,         # 4프레임 간격
+    "num_frames": 15,
+    "sampling_rate": 4,
     "side_size": 320,
     "crop_size": 320,
     "frames_per_second": 30,
@@ -41,7 +44,7 @@ def fixed_interval_sample(frames, interval, num_samples):
 
 # ===== 전처리 함수 =====
 def preprocess_frames(frames):
-    frames = frames.permute(0, 3, 1, 2) / 255.0  # (T, H, W, C) → (T, C, H, W)
+    frames = frames.permute(0, 3, 1, 2) / 255.0  # (T,H,W,C)→(T,C,H,W)
     frames = normalize_video_tensor(frames, mean, std)
     frames = torch.nn.functional.interpolate(
         frames, size=(transform_params["side_size"], transform_params["side_size"]),
@@ -51,7 +54,7 @@ def preprocess_frames(frames):
     center = transform_params["side_size"] // 2
     frames = frames[:, :, center - crop//2:center + crop//2,
                           center - crop//2:center + crop//2]
-    frames = frames.permute(1, 0, 2, 3)  # (T, C, H, W) → (C, T, H, W)
+    frames = frames.permute(1, 0, 2, 3)  # (T,C,H,W)→(C,T,H,W)
     return frames
 
 # ===== X3D 모델 로딩 =====
@@ -59,38 +62,29 @@ x3d = torch.hub.load('facebookresearch/pytorchvideo', model_name, pretrained=Tru
 x3d = nn.Sequential(*list(x3d.blocks[:5]))  # classification head 제거
 x3d = x3d.to(device).eval()
 
-# ===== 이상 판단 함수 =====
-def predict_anomaly(feature, model_path):
-    model = Model(ff_mult=1, dims=(32, 32), depths=(1, 1)).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-    with torch.no_grad():
-        score, _ = model(feature.unsqueeze(0).to(device))  # (1, C, T, H, W)
-        prob = torch.sigmoid(score).item()
-    return prob
-
-# ===== 실시간 슬라이딩 인퍼런스 =====
-def stream_anomaly_inference(path):
-    video = EncodedVideo.from_path(path)
+# ===== 클립별 특징 추출 및 저장 =====
+def extract_and_save_features(video_path, save_path):
+    video = EncodedVideo.from_path(video_path)
     fps = transform_params["frames_per_second"]
     duration = float(video.duration)
-    window_sec = (transform_params["num_frames"] * transform_params["sampling_rate"]) / fps  # 2초
-    stride_sec = 1.0  # 슬라이딩 간격
+    window_sec = (transform_params["num_frames"] * transform_params["sampling_rate"]) / fps
+    stride_sec = 1.0
 
-    total_steps = math.ceil((duration - window_sec) / stride_sec) + 1
-    print(f"📽 Video duration: {duration:.2f}s")
-    print(f"🔄 Sliding window: {window_sec:.2f}s window every {stride_sec:.1f}s → {total_steps} steps\n")
+    features = []
 
-    for step in range(total_steps):
+    total_steps = max(1, math.ceil((duration - window_sec) / stride_sec) + 1)
+    for step in tqdm(range(total_steps), desc="Extracting features", leave=False, ncols=80):
         start = step * stride_sec
         end = start + window_sec
+
         try:
             clip = video.get_clip(start_sec=start, end_sec=end)
         except:
             break
-        frames = clip["video"]  # (C, T, H, W) or (T, H, W, C)
+
+        frames = clip["video"]
         if frames.shape[0] == 3:
-            frames = frames.permute(1, 2, 3, 0)  # → (T, H, W, C)
+            frames = frames.permute(1, 2, 3, 0)
         elif frames.shape[-1] != 3:
             raise ValueError(f"Unsupported frame shape: {frames.shape}")
 
@@ -98,12 +92,30 @@ def stream_anomaly_inference(path):
         frames = preprocess_frames(frames).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            feature = x3d(frames).squeeze(0)
-            score = predict_anomaly(feature, model_path)
-            label = "Abnormal" if score > threshold else "Normal"
-            print(f"[{start:.1f}s ~ {end:.1f}s]  Score: {score:.4f}  → {label}")
+            feature = x3d(frames).squeeze(0).cpu().numpy()  # (C,T,H,W) → np.array
+            features.append(feature)
+
+    features = np.stack(features)  # (N_clips, C, T, H, W)
+    np.save(save_path, features)
+    print(f"✅ Saved: {save_path}")
 
 # ===== MAIN =====
 if __name__ == "__main__":
-    print(f"🚀 Running sliding window inference on video: {video_file}")
-    stream_anomaly_inference(video_file)
+    video_files = [
+        fname for fname in os.listdir(video_root_folder)
+        if os.path.splitext(fname)[-1].lower() in valid_exts
+    ]
+
+    for idx, fname in enumerate(video_files, start=1):
+        print(f"\n[{idx}/{len(video_files)}] Processing {fname}")
+        video_path = os.path.join(video_root_folder, fname)
+        video_name = os.path.splitext(fname)[0]
+        save_path = os.path.join(feature_save_folder, f"{video_name}.npy")
+
+        try:
+            extract_and_save_features(video_path, save_path)
+        except Exception as e:
+            print(f"🚨 Error: {e}")
+            continue
+
+    print(f"\n✅ All features saved in folder: {feature_save_folder}")
